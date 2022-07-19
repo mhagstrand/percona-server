@@ -332,6 +332,11 @@ class ut_lock_free_list_node_t {
   /** Number of elements in 'm_base'. */
   size_t m_n_base_elements;
 
+  /** Number of elements that are in use. This where key has been set to a
+  real values and is not set to UNUSED or AVOID. This is used to determine
+  the load factor of the array and determine if it should grow */
+  ut_lock_free_cnt_t m_n_base_elements_occupied;
+
   /** Indicate whether some thread is waiting for readers to go away
   before it can free the memory occupied by the m_base member. */
   std::atomic_bool m_pending_free;
@@ -366,6 +371,8 @@ class ut_lock_free_list_node_t {
   list, so that no new readers or writers may arrive, and after this
   counter has dropped to zero. */
   ut_lock_free_cnt_t m_n_ref;
+
+
 };
 
 /** Lock free hash table. It stores (key, value) pairs where both the key
@@ -696,6 +703,10 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
   there. */
   static const int64_t GOTO_NEXT_ARRAY = DELETED - 1;
 
+  /** The maximum load factor for the array before it will be grown to a
+  larger size. This factor should be between 1 and 100. */
+  static const size_t MAX_LOAD_FACTOR = 75;
+
   /** (key, val) tuple type. */
   struct key_val_t {
     key_val_t() : m_key(UNUSED), m_val(NOT_FOUND) {}
@@ -801,18 +812,20 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
 
   /** Insert the given key into a given array or return its cell if
   already present.
-  @param[in]	arr		array into which to search and insert
-  @param[in]	arr_size	number of elements in the array
+  @param[in]	arr_node	array into which to search and insert
   @param[in]	key		key to insert or whose cell to retrieve
   @return a pointer to the inserted or previously existent tuple or NULL
   if a tuple with this key is not present in the array and the array is
   full, without any unused cells and thus insertion cannot be done into
   it. */
-  key_val_t *insert_or_get_position_in_array(key_val_t *arr, size_t arr_size,
+  key_val_t *insert_or_get_position_in_array(arr_node_t *arr_node,
                                              uint64_t key) {
 #ifdef UT_HASH_IMPLEMENT_PRINT_STATS
     ++m_n_search;
 #endif /* UT_HASH_IMPLEMENT_PRINT_STATS */
+
+    key_val_t *arr = arr_node->m_base;
+    size_t arr_size = arr_node->m_n_base_elements;
 
     const size_t start = guess_position(key, arr_size);
     const size_t end = start + arr_size;
@@ -837,6 +850,7 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
         uint64_t expected = UNUSED;
         if (cur_tuple->m_key.compare_exchange_strong(
                 expected, key, std::memory_order_relaxed)) {
+          arr_node->m_n_base_elements_occupied.inc();
           return (cur_tuple);
         }
 
@@ -1045,7 +1059,8 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
   optimize(). */
   void insert_or_update(uint64_t key, int64_t val, bool is_delta,
                         arr_node_t *arr, bool optimize_allowed = true) {
-    bool call_optimize = false;
+    bool array_growth_occurred = false;
+
 
     /* Loop through the arrays until we find a free slot to insert
     or until we find a tuple with the specified key and manage to
@@ -1057,8 +1072,7 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
         arr = arr->m_next.load(std::memory_order_relaxed);
       }
 
-      key_val_t *t = insert_or_get_position_in_array(
-          arr->m_base, arr->m_n_base_elements, key);
+      key_val_t *t = insert_or_get_position_in_array(arr, key);
 
       /* t == NULL means that the array is full, must expand
       and go to the next array. */
@@ -1085,12 +1099,13 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
         continue;
       }
 
+
       bool grown_by_this_thread;
 
       next = arr->grow(DELETED, &grown_by_this_thread);
 
       if (grown_by_this_thread) {
-        call_optimize = true;
+        array_growth_occurred = true;
       }
 
       arr->end_access();
@@ -1098,7 +1113,31 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
       arr = next;
     }
 
-    if (optimize_allowed && call_optimize) {
+
+    if (!array_growth_occurred &&
+        arr->begin_access() &&
+        (size_t)arr->m_n_base_elements_occupied.get() >=
+            (arr->m_n_base_elements * MAX_LOAD_FACTOR / 100)
+            ) {
+
+      arr_node_t *next = arr->m_next.load(std::memory_order_relaxed);
+
+      /* If this m_next is set by another thread, this is not a problem
+      because the grow() function does CAS check before performing growing
+      the array. This is just to prevent excessive memory allocation and
+      freeing from calling grow() if another threads has grown
+      the array */
+      if (next == nullptr) {
+        /* array_growth_occurred can be used since it must be false to be
+        in this conditional and grow() will not be called again inside
+        this function */
+
+        arr->grow(DELETED, &array_growth_occurred);
+      }
+      arr->end_access();
+    }
+
+    if (optimize_allowed && array_growth_occurred) {
       optimize();
     }
   }
