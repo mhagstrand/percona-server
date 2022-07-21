@@ -39,6 +39,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <atomic>
 #include <list>
+#include <chrono>
 
 #include "os0numa.h"  /* os_numa_*() */
 #include "ut0mutex.h" /* ib_mutex_t */
@@ -332,9 +333,9 @@ class ut_lock_free_list_node_t {
   /** Number of elements in 'm_base'. */
   size_t m_n_base_elements;
 
-  /** Number of elements that are in use. This where key has been set to a
-  real values and is not set to UNUSED or AVOID. This is used to determine
-  the load factor of the array and determine if it should grow */
+  /** Number of elements that are in use. This where key has been set to an
+  actual value and is not set to UNUSED or AVOID. This is used to determine
+  the load factor of the array and decide if it should grow */
   ut_lock_free_cnt_t m_n_base_elements_occupied;
 
   /** Indicate whether some thread is waiting for readers to go away
@@ -1006,8 +1007,11 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
       around copy_to_another_array() is not needed here
       because the only code that frees memory is below,
       serialized with a mutex. */
-
+      auto start = std::chrono::high_resolution_clock::now();
       copy_to_another_array(arr, next);
+      auto stop = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+      std::cout << "\nTime copying array : " << duration.count() << " microseconds" << std::endl;
 
       arr->m_pending_free.store(true, std::memory_order_release);
 
@@ -1023,9 +1027,13 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
       sub-optimal (ie too long busy wait), then 'arr' could
       be added to some lazy deletion list
       arrays-awaiting-destruction-once-no-readers. */
+      start = std::chrono::high_resolution_clock::now();
       while (arr->n_ref() > 0) {
         ;
       }
+      stop = std::chrono::high_resolution_clock::now();
+      duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+        std::cout << "\nTime waiting for readers : " << duration.count() << " microseconds" << std::endl;
 
       ut::delete_arr(arr->m_base);
       /* The destructor of arr will call ut::delete_arr()
@@ -1082,7 +1090,6 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
       next array. */
 
       if (t != nullptr && update_tuple(t, val, is_delta)) {
-        arr->end_access();
         break;
       }
 
@@ -1095,6 +1102,7 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
         (the reads from the next array in particular)
         to be reordered before the m_next.load()
         above. */
+
         std::atomic_thread_fence(std::memory_order_acquire);
         continue;
       }
@@ -1105,6 +1113,7 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
       next = arr->grow(DELETED, &grown_by_this_thread);
 
       if (grown_by_this_thread) {
+        std::cout << "\nGrown from overflow\n";
         array_growth_occurred = true;
       }
 
@@ -1114,31 +1123,33 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
     }
 
 
-    if (!array_growth_occurred &&
-        arr->begin_access() &&
-        (size_t)arr->m_n_base_elements_occupied.get() >=
-            (arr->m_n_base_elements * MAX_LOAD_FACTOR / 100)
-            ) {
+    if (!array_growth_occurred && !optimize_allowed &&
+        (size_t)arr->m_n_base_elements_occupied.get() >= (arr->m_n_base_elements * MAX_LOAD_FACTOR / 100)
+        ) {
 
       arr_node_t *next = arr->m_next.load(std::memory_order_relaxed);
 
-      /* If this m_next is set by another thread, this is not a problem
-      because the grow() function does CAS check before performing growing
-      the array. This is just to prevent excessive memory allocation and
+      /* If m_next is set by another thread, this is not a problem
+      because the grow() function does a CAS check before growing the array.
+      This is just to prevent excessive memory allocation and
       freeing from calling grow() if another threads has grown
       the array */
       if (next == nullptr) {
+          std::cout << "\nMax Load Factor: Elements in use " << (size_t)arr->m_n_base_elements_occupied.get() << " Total Elements:" << arr->m_n_base_elements << "\n";
         /* array_growth_occurred can be used since it must be false to be
         in this conditional and grow() will not be called again inside
         this function */
-
-        arr->grow(DELETED, &array_growth_occurred);
+          arr->grow(DELETED, &array_growth_occurred);
+          std::cout << "\nGrown from load factor: " << array_growth_occurred << "   \n";
       }
-      arr->end_access();
     }
 
+    arr->end_access();
+
     if (optimize_allowed && array_growth_occurred) {
+      std::cout << "\nEntering optimize\n";
       optimize();
+      std::cout << "\nExit optimize\n";
     }
   }
 
