@@ -1751,6 +1751,10 @@ void srv_export_innodb_status(void) {
 
   export_vars.innodb_buffer_pool_read_ahead_evicted = stat.n_ra_pages_evicted;
 
+  export_vars.innodb_buffer_pool_stats_ht_elements = (ulint)buf_stat_per_index->count();
+
+  export_vars.innodb_buffer_pool_stats_ht_size = (ulint)buf_stat_per_index->capcity();
+
   export_vars.innodb_buffer_pool_pages_LRU_flushed =
       stat.buf_lru_flush_page_count;
 

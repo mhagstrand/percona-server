@@ -95,6 +95,14 @@ class buf_stat_per_index_t {
     return (static_cast<uint64_t>(ret >= 0 ? ret : 0));
   }
 
+  size_t capacity() {
+    return m_store->capacity();
+  }
+
+  size_t count() {
+    return m_store->count();
+  }
+
  private:
   /** Assess if we should skip a page from accounting.
   @param[in]	id	index_id of the page

@@ -665,6 +665,14 @@ class ut_lock_free_hash_t : public ut_hash_interface_t {
     insert_or_update(key, -1, true, m_data.load(std::memory_order_relaxed));
   }
 
+  size_t capacity() override {
+    return 24;
+  }
+
+  size_t count() override {
+    return 10;
+  }
+
 #ifdef UT_HASH_IMPLEMENT_PRINT_STATS
   /** Print statistics about how many searches have been done on the hash
   and how many collisions. */
